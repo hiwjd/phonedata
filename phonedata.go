@@ -4,10 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io/ioutil"
-	"os"
-	"path"
-	"path/filepath"
+	"io"
 )
 
 const (
@@ -23,7 +20,6 @@ const (
 	CHAR_LEN           = 1
 	HEAD_LENGTH        = 8
 	PHONE_INDEX_LENGTH = 9
-	PHONE_DAT          = "phone.dat"
 )
 
 type PhoneRecord struct {
@@ -36,7 +32,6 @@ type PhoneRecord struct {
 }
 
 var (
-	content     []byte
 	CardTypemap = map[byte]string{
 		CMCC:   "中国移动",
 		CUCC:   "中国联通",
@@ -47,31 +42,88 @@ var (
 		CMCC_v: "中国移动虚拟运营商",
 		CBCC_v: "中国广电虚拟运营商",
 	}
-	total_len, firstoffset int32
 )
 
-func init() {
-	dir := os.Getenv("PHONE_DATA_DIR")
-	if dir == "" {
-		execPath, err := os.Executable()
-		if err != nil {
-			panic(err)
-		}
-		dir = filepath.Dir(execPath)
-	}
-	var err error
-	content, err = ioutil.ReadFile(path.Join(dir, PHONE_DAT))
-	if err != nil {
-		panic(err)
-	}
-	total_len = int32(len(content))
-	firstoffset = get4(content[INT_LEN : INT_LEN*2])
+type QueryClient struct {
+	data        []byte
+	totalLen    int32
+	firstOffset int32
 }
 
-func Debug() {
-	fmt.Println(version())
-	fmt.Println(totalRecord())
-	fmt.Println(firstRecordOffset())
+func New(r io.Reader) (*QueryClient, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+
+	return &QueryClient{
+		data:        data,
+		totalLen:    int32(len(data)),
+		firstOffset: get4(data[INT_LEN : INT_LEN*2]),
+	}, nil
+}
+
+func (c QueryClient) Find(phone_num string) (pr *PhoneRecord, err error) {
+	if len(phone_num) < 7 || len(phone_num) > 11 {
+		return nil, errors.New("illegal phone length")
+	}
+
+	var left int32
+	phone_seven_int, err := getN(phone_num[0:7])
+	if err != nil {
+		return nil, errors.New("illegal phone number")
+	}
+	phone_seven_int32 := int32(phone_seven_int)
+	right := (c.totalLen - c.firstOffset) / PHONE_INDEX_LENGTH
+	for {
+		if left > right {
+			break
+		}
+		mid := (left + right) / 2
+		offset := c.firstOffset + mid*PHONE_INDEX_LENGTH
+		if offset >= c.totalLen {
+			break
+		}
+		cur_phone := get4(c.data[offset : offset+INT_LEN])
+		record_offset := get4(c.data[offset+INT_LEN : offset+INT_LEN*2])
+		card_type := c.data[offset+INT_LEN*2 : offset+INT_LEN*2+CHAR_LEN][0]
+		switch {
+		case cur_phone > phone_seven_int32:
+			right = mid - 1
+		case cur_phone < phone_seven_int32:
+			left = mid + 1
+		default:
+			cbyte := c.data[record_offset:]
+			end_offset := int32(bytes.Index(cbyte, []byte("\000")))
+			data := bytes.Split(cbyte[:end_offset], []byte("|"))
+			card_str, ok := CardTypemap[card_type]
+			if !ok {
+				card_str = "未知电信运营商"
+			}
+			pr = &PhoneRecord{
+				PhoneNum: phone_num,
+				Province: string(data[0]),
+				City:     string(data[1]),
+				ZipCode:  string(data[2]),
+				AreaZone: string(data[3]),
+				CardType: card_str,
+			}
+			return
+		}
+	}
+	return nil, errors.New("phone's data not found")
+}
+
+func (c QueryClient) version() string {
+	return string(c.data[0:INT_LEN])
+}
+
+func (c QueryClient) totalRecord() int32 {
+	return (int32(len(c.data)) - c.firstRecordOffset()) / PHONE_INDEX_LENGTH
+}
+
+func (c QueryClient) firstRecordOffset() int32 {
+	return get4(c.data[INT_LEN : INT_LEN*2])
 }
 
 func (pr PhoneRecord) String() string {
@@ -124,68 +176,4 @@ func getN(s string) (uint32, error) {
 		n = n1
 	}
 	return n, nil
-}
-
-func version() string {
-	return string(content[0:INT_LEN])
-}
-
-func totalRecord() int32 {
-	return (int32(len(content)) - firstRecordOffset()) / PHONE_INDEX_LENGTH
-}
-
-func firstRecordOffset() int32 {
-	return get4(content[INT_LEN : INT_LEN*2])
-}
-
-// 二分法查询phone数据
-func Find(phone_num string) (pr *PhoneRecord, err error) {
-	if len(phone_num) < 7 || len(phone_num) > 11 {
-		return nil, errors.New("illegal phone length")
-	}
-
-	var left int32
-	phone_seven_int, err := getN(phone_num[0:7])
-	if err != nil {
-		return nil, errors.New("illegal phone number")
-	}
-	phone_seven_int32 := int32(phone_seven_int)
-	right := (total_len - firstoffset) / PHONE_INDEX_LENGTH
-	for {
-		if left > right {
-			break
-		}
-		mid := (left + right) / 2
-		offset := firstoffset + mid*PHONE_INDEX_LENGTH
-		if offset >= total_len {
-			break
-		}
-		cur_phone := get4(content[offset : offset+INT_LEN])
-		record_offset := get4(content[offset+INT_LEN : offset+INT_LEN*2])
-		card_type := content[offset+INT_LEN*2 : offset+INT_LEN*2+CHAR_LEN][0]
-		switch {
-		case cur_phone > phone_seven_int32:
-			right = mid - 1
-		case cur_phone < phone_seven_int32:
-			left = mid + 1
-		default:
-			cbyte := content[record_offset:]
-			end_offset := int32(bytes.Index(cbyte, []byte("\000")))
-			data := bytes.Split(cbyte[:end_offset], []byte("|"))
-			card_str, ok := CardTypemap[card_type]
-			if !ok {
-				card_str = "未知电信运营商"
-			}
-			pr = &PhoneRecord{
-				PhoneNum: phone_num,
-				Province: string(data[0]),
-				City:     string(data[1]),
-				ZipCode:  string(data[2]),
-				AreaZone: string(data[3]),
-				CardType: card_str,
-			}
-			return
-		}
-	}
-	return nil, errors.New("phone's data not found")
 }

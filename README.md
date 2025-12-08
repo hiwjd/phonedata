@@ -80,6 +80,76 @@ ZipCode: 312000
 Province: 浙江
 ```
 
+
+可以在编译时指定embed标签把数据文件打包进可执行程序：
+```
+go build -tags embed xxx
+```
+
+可以自定义加载数据文件的方式：
+```
+// 从某个路径加载
+package main
+
+import "github.com/hiwjd/phonedata"
+
+func main() {
+	data, err := os.ReadFile("/path/to/phone.dat")
+	if err != nil {
+		panic(err)
+	}
+	client, err := phonedata.New(bytes.NewReader(data))
+	if err != nil {
+		panic(err)
+	}
+	pr, err := client.Find("18957509123")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Print(pr)
+}
+
+// 从HTTP地址加载
+package main
+
+import "github.com/hiwjd/phonedata"
+
+func loadFromHTTP(url string) (io.Reader, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bad status: %s", resp.Status)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	return bytes.NewReader(data), nil
+}
+
+func main() {
+	r, err := loadFromHTTP("http://path/to/phone.dat")
+	if err != nil {
+		panic(err)
+	}
+	client, err := phonedata.New(r)
+	if err != nil {
+		panic(err)
+	}
+	pr, err := client.Find("18957509123")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Print(pr)
+}
+```
+
 ### 性能测试
 
 go version go1.17.6 windows/amd64
